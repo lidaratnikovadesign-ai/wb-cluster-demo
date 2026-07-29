@@ -837,6 +837,10 @@ function ProductClustersCard() {
   const [historyCluster, setHistoryCluster] = useState(null);
 
   const requestPosition = (id) => {
+    // повторное обновление уже проверенного кластера не должно менять его категорию (держит/не держит) —
+    // случайно скакать между статусами при простом рефреше нелогично, обновляется только цифра позиции
+    const prevCluster = clusters.find((c) => c.id === id);
+    const previousType = prevCluster && prevCluster.bidder.state === "resolved" ? prevCluster.bidder.type : null;
     setClusters((prev) => prev.map((c) => (c.id === id ? { ...c, bidder: { state: "loading" } } : c)));
     const delay = 800 + Math.random() * 700;
     setTimeout(() => {
@@ -846,7 +850,7 @@ function ProductClustersCard() {
           // "Держат позицию" — кластер гарантированно в диапазоне, проверка не может выявить другое
           const type = c.filterStatus === "holding"
             ? "holding"
-            : RESOLVE_TYPES[Math.floor(Math.random() * RESOLVE_TYPES.length)];
+            : previousType || RESOLVE_TYPES[Math.floor(Math.random() * RESOLVE_TYPES.length)];
           // держим позицию — попадает в целевой диапазон 3–10 (см. "Автобиддер" в шапке товара);
           // вне диапазона — заведомо хуже (11–16), а не любое случайное число
           if (type === "holding") {
@@ -861,19 +865,20 @@ function ProductClustersCard() {
     }, delay);
   };
 
-  // "держим"/"не держим" — не статичный тег, а живое вычисление по факту проверки:
-  // держим = проверка подтвердила "holding"; не держим = проверка подтвердила "вне диапазона" ИЛИ ошибка/лимит
+  // три независимых статуса — не статичные теги, а живое вычисление по факту проверки:
+  // попали в диапазон = проверка подтвердила "holding"; не попали = проверка подтвердила "вне диапазона";
+  // не держат позиции = ошибка/лимит автобиддера (статический тег, известен без проверки)
   const isHolding = (c) => c.bidder.state === "resolved" && c.bidder.type === "holding";
-  const isNotHolding = (c) => c.positionLocked || (c.bidder.state === "resolved" && c.bidder.type === "out_of_range");
+  const isOutOfRange = (c) => c.bidder.state === "resolved" && c.bidder.type === "out_of_range";
+  const isError = (c) => c.positionLocked;
 
   const counts = useMemo(
     () => ({
       active: clusters.filter((c) => c.filterStatus === "active").length,
       inactive: clusters.filter((c) => c.filterStatus === "inactive").length,
-      // счётчик "Держим позицию" — сколько РЕАЛЬНО в диапазоне (статический тег), т.к. по клику на пилюлю
-      // все они принудительно проверяются и гарантированно подтвердятся; для "не держим" такой гарантии нет
-      holding: clusters.filter((c) => c.filterStatus === "holding").length,
-      not_holding: clusters.filter(isNotHolding).length,
+      // счётчик есть только у "Не держат позиции" — это статический тег (ошибка/лимит), известен заранее.
+      // "Попали"/"Не попали в диапазон" подтверждаются только проверкой, поэтому у них счётчика нет
+      not_holding: clusters.filter(isError).length,
     }),
     [clusters]
   );
@@ -881,7 +886,8 @@ function ProductClustersCard() {
   const filtered = useMemo(() => {
     const matchesTab = (c) => {
       if (activeFilter === "holding") return isHolding(c);
-      if (activeFilter === "not_holding") return isNotHolding(c);
+      if (activeFilter === "out_of_range") return isOutOfRange(c);
+      if (activeFilter === "not_holding") return isError(c);
       return c.filterStatus === activeFilter;
     };
     return clusters.filter((c) => matchesTab(c) && c.name.toLowerCase().includes(query.trim().toLowerCase()));
@@ -1014,8 +1020,9 @@ function ProductClustersCard() {
           <div className="flex items-center gap-2 mb-5 flex-wrap">
             <Pill label="Активные" count={counts.active} active={activeFilter === "active"} onClick={() => selectFilter("active")} />
             <Pill label="Неактивные" count={counts.inactive} active={activeFilter === "inactive"} onClick={() => selectFilter("inactive")} />
-            <Pill label="В диапазоне" active={activeFilter === "holding"} onClick={() => selectFilter("holding")} />
-            <Pill label="Не попали в диапазон" active={activeFilter === "not_holding"} onClick={() => selectFilter("not_holding")}
+            <Pill label="Попали в диапазон" active={activeFilter === "holding"} onClick={() => selectFilter("holding")} />
+            <Pill label="Не попали в диапазон" active={activeFilter === "out_of_range"} onClick={() => selectFilter("out_of_range")} />
+            <Pill label="Не держат позиции" count={counts.not_holding} active={activeFilter === "not_holding"} onClick={() => selectFilter("not_holding")}
                   icon={<ILockOpenOff className={`w-3.5 h-3.5 ${activeFilter === "not_holding" ? "text-white" : "text-orange-500"}`} />} />
           </div>
 
