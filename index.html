@@ -72,33 +72,41 @@ const NAME_POOL = [
   "платье летнее для беременных", "платье летнее для подростков", "платье летнее в клетку", "платье летнее батал",
 ];
 
-// каждая категория фильтра получает 10 строк
-// "Держат позицию" — только кластеры, которые реально попадают в диапазон, заданный в автобиддере
-// "locked" — кластер не держит позицию: иконка открытого замка у названия, под позицией — причина, проверка недоступна
 // на старте (и при перезагрузке) все проверяемые кластеры показывают "узнать текущую" — заранее ничего не резолвится
 // 2 «узнать позицию» → 1 с ошибкой → 2 «узнать позицию» → 2 подряд с ошибкой → остаток тем же чередованием
 const STATE_CYCLE = ["unknown", "unknown", "locked", "unknown", "unknown", "locked", "locked", "unknown", "unknown", "locked"];
 
 const NOT_HOLDING_REASON = "Увеличьте лимит ставки";
 
-const FILTERS = ["active", "inactive", "holding", "not_holding"];
+// filterStatus ("active"/"inactive") — активна ли карточка вообще (по ней показывается реклама или нет).
+// Это отдельное измерение от результата проверки позиции (держит/не держит/ошибка) — тот считается
+// только для активных кластеров, поэтому "Активные" всегда ⩾ суммы держат/не держат/ошибка.
+// Неактивные — вообще без статуса проверки (см. PositionCell).
+// forcedType — для наглядности демо часть активных кластеров гарантированно резолвится в конкретный
+// результат при проверке, а не выбирается случайно из RESOLVE_TYPES.
+const GROUPS = [
+  { count: 8, filterStatus: "active", kind: (i) => STATE_CYCLE[i] },        // обычные активные: часть без проверки, часть — сразу ошибка
+  { count: 10, filterStatus: "active", kind: () => "forced_holding" },       // гарантированно попадают в диапазон при проверке
+  { count: 2, filterStatus: "active", kind: () => "forced_out_of_range" },   // гарантированно НЕ попадают в диапазон при проверке
+  { count: 10, filterStatus: "active", kind: () => "locked" },               // гарантированно ошибка/лимит — не держат позицию
+  { count: 10, filterStatus: "inactive", kind: () => "inactive" },           // неактивные — карточка не показывается, статуса нет
+];
+
 const initialClusters = [];
 {
   let id = 1;
   let nameIdx = 0;
-  FILTERS.forEach((filterStatus) => {
-    for (let i = 0; i < 10; i++) {
-      // "Держат позицию" — все кластеры уже в диапазоне; "Не держат позицию" — все потеряли позицию
-      const kind =
-        filterStatus === "holding" ? "holding" :
-        filterStatus === "not_holding" ? "locked" :
-        STATE_CYCLE[i];
-      const positionLocked = kind === "locked";
+  GROUPS.forEach(({ count, filterStatus, kind }) => {
+    for (let i = 0; i < count; i++) {
+      const k = kind(i);
+      const positionLocked = k === "locked";
+      const forcedType = k === "forced_holding" ? "holding" : k === "forced_out_of_range" ? "out_of_range" : null;
       initialClusters.push({
         id: id++,
         name: NAME_POOL[nameIdx++ % NAME_POOL.length],
         filterStatus,
         positionLocked,
+        forcedType,
         notHoldingReason: positionLocked ? NOT_HOLDING_REASON : null,
         clicks: 100 + ((id * 137) % 6000),
         cart: 10,
@@ -108,6 +116,9 @@ const initialClusters = [];
         avgPosition: 10.5,
         // при первой загрузке проверка ещё не запрошена — состояние всегда "unknown", кроме кластеров без права проверки
         bidder: { state: "unknown" },
+        // последний ПОДТВЕРЖДЁННЫЙ статус проверки — не сбрасывается на время рефреша (state: "loading"),
+        // чтобы строка не выпадала из текущей вкладки фильтра, пока идёт повторная проверка её же кластера
+        lastType: null,
       });
     }
   });
@@ -706,9 +717,18 @@ function HistoryTrigger({ onClick }) {
 
 /* ───────────────────────── Position cell ───────────────────────── */
 function PositionCell({ cluster, onRequest, onShowHistory }) {
-  const { bidder, avgPosition, positionLocked, notHoldingReason } = cluster;
+  const { bidder, avgPosition, positionLocked, notHoldingReason, filterStatus } = cluster;
   const [showReturningTip, setShowReturningTip] = useState(false);
   const returningRef = useRef(null);
+
+  // неактивный кластер — автобиддер по нему не работает, поэтому у него нет вообще никакого статуса позиции
+  if (filterStatus === "inactive") {
+    return (
+      <div className="flex flex-col items-end gap-1 min-h-[38px] justify-center">
+        <span className="text-[15px] text-gray-900">{avgPosition}</span>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col items-end gap-1 min-h-[38px] justify-center">
@@ -847,19 +867,17 @@ function ProductClustersCard() {
       setClusters((prev) =>
         prev.map((c) => {
           if (c.id !== id) return c;
-          // "Держат позицию" — кластер гарантированно в диапазоне, проверка не может выявить другое
-          const type = c.filterStatus === "holding"
-            ? "holding"
-            : previousType || RESOLVE_TYPES[Math.floor(Math.random() * RESOLVE_TYPES.length)];
+          // forcedType — кластер гарантированно резолвится в конкретный результат, проверка не может выявить другое
+          const type = c.forcedType || previousType || RESOLVE_TYPES[Math.floor(Math.random() * RESOLVE_TYPES.length)];
           // держим позицию — попадает в целевой диапазон 3–10 (см. "Автобиддер" в шапке товара);
           // вне диапазона — заведомо хуже (11–16), а не любое случайное число
           if (type === "holding") {
-            return { ...c, bidder: { state: "resolved", type, currentPosition: Math.floor(Math.random() * (10 - 3 + 1)) + 3 } };
+            return { ...c, lastType: type, bidder: { state: "resolved", type, currentPosition: Math.floor(Math.random() * (10 - 3 + 1)) + 3 } };
           }
           if (type === "out_of_range") {
-            return { ...c, bidder: { state: "resolved", type, currentPosition: Math.floor(Math.random() * (16 - 11 + 1)) + 11 } };
+            return { ...c, lastType: type, bidder: { state: "resolved", type, currentPosition: Math.floor(Math.random() * (16 - 11 + 1)) + 11 } };
           }
-          return { ...c, bidder: { state: "resolved", type } };
+          return { ...c, lastType: type, bidder: { state: "resolved", type } };
         })
       );
     }, delay);
@@ -868,8 +886,10 @@ function ProductClustersCard() {
   // три независимых статуса — не статичные теги, а живое вычисление по факту проверки:
   // попали в диапазон = проверка подтвердила "holding"; не попали = проверка подтвердила "вне диапазона";
   // не держат позиции = ошибка/лимит автобиддера (статический тег, известен без проверки)
-  const isHolding = (c) => c.bidder.state === "resolved" && c.bidder.type === "holding";
-  const isOutOfRange = (c) => c.bidder.state === "resolved" && c.bidder.type === "out_of_range";
+  // сверяемся с lastType (а не с текущим bidder.state) — иначе строка на время рефреша ("loading")
+  // выпадала бы из своей же вкладки фильтра, и соседние строки "прыгали" бы, заполняя пустое место
+  const isHolding = (c) => c.lastType === "holding";
+  const isOutOfRange = (c) => c.lastType === "out_of_range";
   const isError = (c) => c.positionLocked;
 
   const counts = useMemo(
@@ -903,12 +923,12 @@ function ProductClustersCard() {
     // сколько из них реально держат, неизвестно заранее — пока не проверили, счётчик не показываем
     if (f === "holding") {
       setHoldingLoading(true);
-      setClusters((prev) => prev.map((c) => (c.filterStatus === "holding" ? { ...c, bidder: { state: "loading" } } : c)));
+      setClusters((prev) => prev.map((c) => (c.forcedType === "holding" ? { ...c, bidder: { state: "loading" } } : c)));
       setTimeout(() => {
         setClusters((prev) =>
           prev.map((c) =>
-            c.filterStatus === "holding"
-              ? { ...c, bidder: { state: "resolved", type: "holding", currentPosition: Math.floor(Math.random() * (10 - 3 + 1)) + 3 } }
+            c.forcedType === "holding"
+              ? { ...c, lastType: "holding", bidder: { state: "resolved", type: "holding", currentPosition: Math.floor(Math.random() * (10 - 3 + 1)) + 3 } }
               : c
           )
         );
