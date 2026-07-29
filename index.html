@@ -854,6 +854,7 @@ function ProductClustersCard() {
   const [page, setPage] = useState(1);
   const [recommendation, setRecommendation] = useState("12");
   const [holdingLoading, setHoldingLoading] = useState(false);
+  const [outOfRangeLoading, setOutOfRangeLoading] = useState(false);
   const [historyCluster, setHistoryCluster] = useState(null);
 
   const requestPosition = (id) => {
@@ -933,6 +934,22 @@ function ProductClustersCard() {
           )
         );
         setHoldingLoading(false);
+      }, 1200);
+    }
+    // переход на "Не попали в диапазон" — та же логика: сразу показываем гарантированные примеры,
+    // не заставляя вручную нажимать "узнать текущую" у каждого
+    if (f === "out_of_range") {
+      setOutOfRangeLoading(true);
+      setClusters((prev) => prev.map((c) => (c.forcedType === "out_of_range" ? { ...c, bidder: { state: "loading" } } : c)));
+      setTimeout(() => {
+        setClusters((prev) =>
+          prev.map((c) =>
+            c.forcedType === "out_of_range"
+              ? { ...c, lastType: "out_of_range", bidder: { state: "resolved", type: "out_of_range", currentPosition: Math.floor(Math.random() * (16 - 11 + 1)) + 11 } }
+              : c
+          )
+        );
+        setOutOfRangeLoading(false);
       }, 1200);
     }
   };
@@ -1081,7 +1098,7 @@ function ProductClustersCard() {
 
             {/* cluster rows */}
             <div className="max-h-[520px] overflow-y-auto">
-              {activeFilter === "holding" && holdingLoading ? (
+              {(activeFilter === "holding" && holdingLoading) || (activeFilter === "out_of_range" && outOfRangeLoading) ? (
                 <div className="flex items-center justify-center py-16 border-t border-gray-100">
                   <ISpinner className="w-7 h-7 text-violet-600" />
                 </div>
