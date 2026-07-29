@@ -115,8 +115,10 @@ const initialClusters = [];
 
 const TOTALS = { avgPosition: 10.5, clicks: 953214, cart: 30165, orders: 128, spend: 75, cost: 1488, cpc: 43.76 };
 
-// проверка позиции никогда не выявляет "cant_hold" — если бы автобиддер не держал, кнопки проверки бы не было вовсе
-const RESOLVE_TYPES = ["holding", "returning"];
+// проверка позиции никогда не выявляет "cant_hold" — если бы автобиддер не держал, кнопки проверки бы не было вовсе.
+// "out_of_range" — нейтральный факт (позиция известна, но вне диапазона), в отличие от "returning",
+// где автобиддер прямо сейчас активно корректирует ставку
+const RESOLVE_TYPES = ["holding", "returning", "out_of_range"];
 const fmt = (n) => n.toLocaleString("ru-RU");
 
 /* ───────────────────────── История автобиддера (моки) ───────────────────────── */
@@ -689,7 +691,7 @@ function PositionCell({ cluster, onRequest, onShowHistory }) {
       <span className="text-[15px] text-gray-900">{avgPosition}</span>
 
       {positionLocked && (
-        <span className="inline-flex flex-wrap items-center justify-end gap-1 text-sm text-amber-600 text-right">
+        <span className="inline-flex items-center justify-end gap-1 whitespace-nowrap text-sm text-amber-600 text-right">
           <IAlertTriangle className="w-3.5 h-3.5 shrink-0" />
           <span>{notHoldingReason}</span>
           <HistoryTrigger onClick={() => onShowHistory(cluster)} />
@@ -710,10 +712,20 @@ function PositionCell({ cluster, onRequest, onShowHistory }) {
       )}
 
       {bidder.state === "resolved" && bidder.type === "holding" && (
-        <span className="inline-flex flex-wrap items-center justify-end gap-1 text-sm text-emerald-600 text-right">
-          <ICheckCircle className="w-3.5 h-3.5 shrink-0" />
+        <span className="inline-flex items-center justify-end gap-1 whitespace-nowrap text-sm text-gray-700 text-right">
+          <ICheckCircle className="w-3.5 h-3.5 shrink-0 text-emerald-600" />
           <span>текущая: {bidder.currentPosition}</span>
-          <button onClick={() => onRequest(cluster.id)} className="text-gray-400 hover:text-gray-600">
+          <button onClick={() => onRequest(cluster.id)} className="text-blue-600 hover:text-blue-700">
+            <IRefresh className="w-3.5 h-3.5" />
+          </button>
+          <HistoryTrigger onClick={() => onShowHistory(cluster)} />
+        </span>
+      )}
+
+      {bidder.state === "resolved" && bidder.type === "out_of_range" && (
+        <span className="inline-flex items-center justify-end gap-1 whitespace-nowrap text-sm text-gray-700 text-right">
+          <span>текущая: {bidder.currentPosition}</span>
+          <button onClick={() => onRequest(cluster.id)} className="text-blue-600 hover:text-blue-700">
             <IRefresh className="w-3.5 h-3.5" />
           </button>
           <HistoryTrigger onClick={() => onShowHistory(cluster)} />
@@ -721,12 +733,7 @@ function PositionCell({ cluster, onRequest, onShowHistory }) {
       )}
 
       {bidder.state === "resolved" && bidder.type === "returning" && (
-        <span className="inline-flex flex-wrap items-center justify-end gap-1 text-sm text-slate-700 text-right">
-          <span className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-slate-700 shrink-0">
-            <svg viewBox="0 0 24 24" className="w-2.5 h-2.5" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-              <path d="m5 12.5 4.5 4.5L19 7"/>
-            </svg>
-          </span>
+        <span className="inline-flex items-center justify-end gap-1 whitespace-nowrap text-sm text-gray-700 text-right">
           <span className="relative group cursor-default">
             возвращаем в диапазон
             {/* pb-2 вместо margin — зазор входит в наводимую область, тултип не пропадает при движении курсора к нему */}
@@ -736,7 +743,7 @@ function PositionCell({ cluster, onRequest, onShowHistory }) {
               </div>
             </div>
           </span>
-          <button onClick={() => onRequest(cluster.id)} className="text-gray-400 hover:text-gray-600">
+          <button onClick={() => onRequest(cluster.id)} className="text-blue-600 hover:text-blue-700">
             <IRefresh className="w-3.5 h-3.5" />
           </button>
           <HistoryTrigger onClick={() => onShowHistory(cluster)} />
@@ -751,7 +758,7 @@ function PositionCell({ cluster, onRequest, onShowHistory }) {
 function ClusterRow({ cluster, onRequest, onShowHistory }) {
   return (
     <div className="grid items-center gap-4 px-6 py-4 border-t border-gray-100 hover:bg-gray-50/60"
-         style={{ gridTemplateColumns: "1fr 190px 100px 100px 140px 110px 90px" }}>
+         style={{ gridTemplateColumns: "1fr 220px 100px 100px 140px 110px 90px" }}>
       <div className="flex items-center justify-between gap-2 min-w-0">
         <span className="text-[15px] text-gray-900 truncate">{cluster.name}</span>
         <span className="flex items-center gap-2 shrink-0">
@@ -816,8 +823,8 @@ function ProductClustersCard() {
           const type = c.filterStatus === "holding"
             ? "holding"
             : RESOLVE_TYPES[Math.floor(Math.random() * RESOLVE_TYPES.length)];
-          if (type === "holding") {
-            return { ...c, bidder: { state: "resolved", type, currentPosition: Math.floor(Math.random() * 10) + 1 } };
+          if (type === "holding" || type === "out_of_range") {
+            return { ...c, bidder: { state: "resolved", type, currentPosition: Math.floor(Math.random() * 16) + 1 } };
           }
           return { ...c, bidder: { state: "resolved", type } };
         })
@@ -825,20 +832,30 @@ function ProductClustersCard() {
     }, delay);
   };
 
+  // "держим"/"не держим" — не статичный тег, а живое вычисление по факту проверки:
+  // держим = проверка подтвердила "holding"; не держим = проверка подтвердила "вне диапазона" ИЛИ ошибка/лимит
+  const isHolding = (c) => c.bidder.state === "resolved" && c.bidder.type === "holding";
+  const isNotHolding = (c) => c.positionLocked || (c.bidder.state === "resolved" && c.bidder.type === "out_of_range");
+
   const counts = useMemo(
     () => ({
       active: clusters.filter((c) => c.filterStatus === "active").length,
       inactive: clusters.filter((c) => c.filterStatus === "inactive").length,
+      // счётчик "Держим позицию" — сколько РЕАЛЬНО в диапазоне (статический тег), т.к. по клику на пилюлю
+      // все они принудительно проверяются и гарантированно подтвердятся; для "не держим" такой гарантии нет
       holding: clusters.filter((c) => c.filterStatus === "holding").length,
-      not_holding: clusters.filter((c) => c.filterStatus === "not_holding").length,
+      not_holding: clusters.filter(isNotHolding).length,
     }),
     [clusters]
   );
 
   const filtered = useMemo(() => {
-    return clusters.filter(
-      (c) => c.filterStatus === activeFilter && c.name.toLowerCase().includes(query.trim().toLowerCase())
-    );
+    const matchesTab = (c) => {
+      if (activeFilter === "holding") return isHolding(c);
+      if (activeFilter === "not_holding") return isNotHolding(c);
+      return c.filterStatus === activeFilter;
+    };
+    return clusters.filter((c) => matchesTab(c) && c.name.toLowerCase().includes(query.trim().toLowerCase()));
   }, [clusters, activeFilter, query]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
@@ -969,7 +986,7 @@ function ProductClustersCard() {
             <Pill label="Активные" count={counts.active} active={activeFilter === "active"} onClick={() => selectFilter("active")} />
             <Pill label="Неактивные" count={counts.inactive} active={activeFilter === "inactive"} onClick={() => selectFilter("inactive")} />
             <Pill label="Держат позицию" active={activeFilter === "holding"} onClick={() => selectFilter("holding")} />
-            <Pill label="Не держат позицию" count={counts.not_holding} active={activeFilter === "not_holding"} onClick={() => selectFilter("not_holding")}
+            <Pill label="Не держат позицию" active={activeFilter === "not_holding"} onClick={() => selectFilter("not_holding")}
                   icon={<ILockOpenOff className={`w-3.5 h-3.5 ${activeFilter === "not_holding" ? "text-white" : "text-orange-500"}`} />} />
           </div>
 
@@ -985,7 +1002,7 @@ function ProductClustersCard() {
 
           <div className="border border-gray-100 rounded-xl overflow-hidden">
             {/* column headers */}
-            <div className="grid items-center gap-4 px-6 py-3 bg-white" style={{ gridTemplateColumns: "1fr 190px 100px 100px 140px 110px 90px" }}>
+            <div className="grid items-center gap-4 px-6 py-3 bg-white" style={{ gridTemplateColumns: "1fr 220px 100px 100px 140px 110px 90px" }}>
               <div />
               <ColHead label="Средняя позиция" tip="Средняя позиция кластера в поиске" className="justify-end text-right" />
               <ColHead label="Клики" tip="Количество кликов по товару" className="justify-end text-right" />
@@ -996,7 +1013,7 @@ function ProductClustersCard() {
             </div>
 
             {/* totals row */}
-            <div className="grid items-center gap-4 px-6 py-4 border-t border-gray-100 font-semibold" style={{ gridTemplateColumns: "1fr 190px 100px 100px 140px 110px 90px" }}>
+            <div className="grid items-center gap-4 px-6 py-4 border-t border-gray-100 font-semibold" style={{ gridTemplateColumns: "1fr 220px 100px 100px 140px 110px 90px" }}>
               <div className="text-[15px] text-gray-900">Всего по товару</div>
               <div className="text-[15px] text-gray-900 text-right">{TOTALS.avgPosition}</div>
               <div className="text-[15px] text-gray-900 text-right">{fmt(TOTALS.clicks)}</div>
